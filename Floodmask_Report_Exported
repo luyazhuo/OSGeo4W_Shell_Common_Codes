@@ -1,0 +1,81 @@
+exec(r'''
+import os
+import glob
+import html
+import numpy as np
+from osgeo import gdal, osr
+
+folder = r"F:\Infrastructure_impact\Results\Rumbia_2018_new"
+out_dir = os.path.join(folder, "FloodMask_Reports")
+os.makedirs(out_dir, exist_ok=True)
+
+files = sorted(glob.glob(os.path.join(folder, "*_FloodMask.tif")))
+if not files:
+    raise RuntimeError("没有找到 FloodMask 文件，请检查路径。")
+
+print(f"共找到 {len(files)} 个文件\n")
+
+for path in files:
+    name = os.path.splitext(os.path.basename(path))[0]
+    ds = gdal.Open(path)
+    if ds is None:
+        print(f"读取失败：{name}")
+        continue
+
+    band = ds.GetRasterBand(1)
+    mask = band.GetMaskBand()
+    flood_count = 0
+    valid_count = 0
+    other_count = 0
+
+    # 分块读取，避免一次占满内存
+    for y in range(0, ds.RasterYSize, 512):
+        for x in range(0, ds.RasterXSize, 512):
+            w = min(512, ds.RasterXSize - x)
+            h = min(512, ds.RasterYSize - y)
+            a = band.ReadAsArray(x, y, w, h)
+            valid = (mask.ReadAsArray(x, y, w, h) != 0)
+            valid &= np.isfinite(a)
+
+            valid_count += int(np.count_nonzero(valid))
+            flood_count += int(np.count_nonzero(valid & (a == 1)))
+            other_count += int(np.count_nonzero(
+                valid & (a != 0) & (a != 1)
+            ))
+
+    srs = osr.SpatialReference()
+    projection = ds.GetProjection()
+    if projection:
+        srs.ImportFromWkt(projection)
+
+    area_text = "无法计算：需要具有有效坐标系的投影栅格"
+    if projection and srs.IsProjected():
+        gt = ds.GetGeoTransform()
+        pixel_area = abs(gt[1] * gt[5] - gt[2] * gt[4])
+        pixel_area *= srs.GetLinearUnits() ** 2
+        flood_m2 = flood_count * pixel_area
+        area_text = f"{flood_m2:,.2f} m² = {flood_m2 / 1e6:,.4f} km²"
+
+    report = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>{html.escape(name)}</title></head>
+<body>
+<h2>{html.escape(name)}</h2>
+<p>有效像元数：{valid_count:,}</p>
+<p>洪水像元数（Value = 1）：{flood_count:,}</p>
+<p><b>洪水面积：{area_text}</b></p>
+<p>非 0/1 的有效像元数：{other_count:,}</p>
+<p>面积仅统计 Value = 1，排除 NoData。</p>
+</body></html>"""
+
+    output = os.path.join(out_dir, name + "_Report.html")
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(report)
+
+    print(f"{name}：{area_text}")
+    if other_count:
+        print("  注意：存在非 0/1 值，请确认掩膜编码。")
+    ds = None
+
+print("\n报告已保存到：" + out_dir)
+''')
