@@ -1,0 +1,79 @@
+exec(r'''
+import os
+from osgeo import gdal
+
+gdal.UseExceptions()
+
+# 已下载的 2018 年人口数据
+pop = r"F:\Impact_IWI\Human_Capital\chn_pop_2018_CN_100m_R2025A_v1.tif"
+
+base = r"F:\Infrastructure_impact\Results\Rumbia_2018_new"
+old_base = r"F:\Infrastructure_impact\Results\Rumbia_2018"
+
+out_dir = os.path.join(base, "Population")
+os.makedirs(out_dir, exist_ok=True)
+
+cities = [
+    "Shangqiu",
+    "Suzhou",
+    "Zhoukou",
+    "Huaibei",
+    "Dongying",
+    "Xuzhou",
+    "Weifang",
+]
+
+if not os.path.isfile(pop):
+    raise FileNotFoundError("2018 年人口文件不存在，请确认下载已完成：" + pop)
+
+# 查找城市边界
+tasks = []
+missing = []
+
+for city in cities:
+    candidates = [
+        os.path.join(base, city + "_shp.shp"),
+        os.path.join(base, "shp", city + "_shp.shp"),
+        os.path.join(old_base, "shp", city + "_shp.shp"),
+        os.path.join(old_base, city + "_shp.shp"),
+    ]
+
+    shp = next((p for p in candidates if os.path.isfile(p)), None)
+
+    if shp is None:
+        missing.append(city)
+    else:
+        tasks.append((city, shp))
+
+if missing:
+    raise FileNotFoundError("未找到这些城市的边界：" + ", ".join(missing))
+
+for city, shp in tasks:
+    output = os.path.join(out_dir, city + "_Pop_2018_Clip.tif")
+    print(f"正在裁剪：{city}", flush=True)
+
+    result = gdal.Warp(
+        output,
+        pop,
+        format="GTiff",
+        cutlineDSName=shp,
+        cropToCutline=True,
+        resampleAlg="near",
+        dstNodata=-9999,
+        outputType=gdal.GDT_Float32,
+        multithread=True,
+        creationOptions=[
+            "COMPRESS=LZW",
+            "TILED=YES",
+            "BIGTIFF=IF_SAFER",
+        ],
+    )
+
+    if result is None:
+        raise RuntimeError(city + " 裁剪失败")
+
+    result = None
+    print(f"完成：{output}", flush=True)
+
+print("\n七个城市的 2018 年人口裁剪完成！")
+''')
