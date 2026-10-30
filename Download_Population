@@ -1,0 +1,78 @@
+exec(r'''
+import os
+import shutil
+import subprocess
+from osgeo import gdal
+
+gdal.UseExceptions()
+
+folder = r"F:\Impact_IWI\Human_Capital"
+os.makedirs(folder, exist_ok=True)
+
+curl = shutil.which("curl.exe") or shutil.which("curl")
+if not curl:
+    raise RuntimeError("没有找到 curl，请使用 Windows 自带的 curl.exe。")
+
+base_url = (
+    "https://worldpop-public-data.soton.ac.uk"
+    "/GIS/Population/Global_2015_2030/R2025A"
+)
+
+def readable_tif(path):
+    try:
+        ds = gdal.Open(path)
+        valid = ds is not None and ds.RasterCount > 0
+        ds = None
+        return valid
+    except Exception:
+        return False
+
+failed = []
+
+for year in range(2016, 2026):
+    name = f"chn_pop_{year}_CN_100m_R2025A_v1.tif"
+    output = os.path.join(folder, name)
+    partial = output + ".part"
+
+    if os.path.exists(output):
+        if readable_tif(output):
+            print(f"\n跳过已有文件：{year}", flush=True)
+            continue
+        print(f"\n已有文件无法读取，保留原文件：{output}", flush=True)
+        failed.append(year)
+        continue
+
+    url = f"{base_url}/{year}/CHN/v1/100m/constrained/{name}"
+
+    print(f"\n========== 下载 {year} ==========", flush=True)
+    result = subprocess.run([
+        curl,
+        "--fail",
+        "--location",
+        "--retry", "5",
+        "--retry-delay", "5",
+        "--connect-timeout", "60",
+        "--continue-at", "-",
+        "--output", partial,
+        url,
+    ])
+
+    if result.returncode != 0:
+        print(f"\n{year} 下载未完成，保留临时文件供下次续传。")
+        failed.append(year)
+        continue
+
+    if not readable_tif(partial):
+        print(f"\n{year} 文件检查失败，请检查：{partial}")
+        failed.append(year)
+        continue
+
+    os.replace(partial, output)
+    print(f"\n{year} 完成：{output}", flush=True)
+
+print("\n保存目录：" + folder)
+if failed:
+    print("需要检查或重试的年份：" + ", ".join(map(str, failed)))
+else:
+    print("2016—2025 年全部就绪！")
+''')
