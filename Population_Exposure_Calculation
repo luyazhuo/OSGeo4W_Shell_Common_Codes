@@ -1,0 +1,158 @@
+
+exec(r'''
+import os
+import glob
+import numpy as np
+from osgeo import gdal
+
+gdal.UseExceptions()
+
+base = r"F:\Infrastructure_impact\Results\NorthChina_2025"
+pop_dir = os.path.join(base, "Population")
+out_dir = os.path.join(base, "Exposed_Population")
+os.makedirs(out_dir, exist_ok=True)
+
+cities = ["city1", "city2", "city3", "city4"]
+
+for city in cities:
+    print(f"\n正在处理：{city}", flush=True)
+
+    pop = os.path.join(
+        pop_dir, f"{city}_Pop_2025_Clip.tif"
+    )
+
+    # 自动寻找对应城市的 Flood Mask
+    matches = [
+        p for p in glob.glob(
+            os.path.join(base, "**", "*.tif"),
+            recursive=True
+        )
+        if os.path.basename(p).lower().startswith(city.lower() + "_")
+        and "floodmask" in os.path.basename(p).lower().replace("_", "")
+    ]
+
+    if not os.path.isfile(pop):
+        print("缺少人口栅格：", pop)
+        continue
+
+    if len(matches) != 1:
+        print("Flood Mask 匹配数量：", len(matches))
+        print(matches)
+        print("请检查文件，跳过该城市")
+        continue
+
+    flood = matches[0]
+    print("Flood Mask:", flood)
+
+    aligned = os.path.join(
+        pop_dir, f"{city}_Pop_2025_32650_sum.tif"
+    )
+
+    output = os.path.join(
+        out_dir, f"{city}_Exposed_Pop_2025.tif"
+    )
+
+    # 1. 人口对齐到洪水掩膜网格
+    fd = gdal.Open(flood)
+    gt = fd.GetGeoTransform()
+
+    xmin = gt[0]
+    ymax = gt[3]
+    xmax = xmin + fd.RasterXSize * gt[1]
+    ymin = ymax + fd.RasterYSize * gt[5]
+
+    if gt[2] != 0 or gt[4] != 0:
+        raise RuntimeError("暂不支持旋转网格：" + city)
+
+    opts = gdal.WarpOptions(
+        format="GTiff",
+        outputBounds=(xmin, ymin, xmax, ymax),
+        width=fd.RasterXSize,
+        height=fd.RasterYSize,
+        dstSRS=fd.GetProjection(),
+        resampleAlg="sum",
+        srcNodata=-9999,
+        dstNodata=-9999,
+        outputType=gdal.GDT_Float32,
+        creationOptions=[
+            "COMPRESS=LZW",
+            "TILED=YES",
+            "BIGTIFF=IF_SAFER"
+        ]
+    )
+
+    aligned_ds = gdal.Warp(aligned, pop, options=opts)
+    aligned_ds = None
+
+    # 2. Flood Mask × Population
+    pd = gdal.Open(aligned)
+
+    driver = gdal.GetDriverByName("GTiff")
+    out = driver.Create(
+        output,
+        fd.RasterXSize,
+        fd.RasterYSize,
+        1,
+        gdal.GDT_Float32,
+        options=[
+            "COMPRESS=LZW",
+            "TILED=YES",
+            "BIGTIFF=IF_SAFER"
+        ]
+    )
+
+    out.SetGeoTransform(gt)
+    out.SetProjection(fd.GetProjection())
+    ob = out.GetRasterBand(1)
+    ob.SetNoDataValue(-9999)
+
+    fb = fd.GetRasterBand(1)
+    pb = pd.GetRasterBand(1)
+
+    fnd = fb.GetNoDataValue()
+    pnd = pb.GetNoDataValue()
+
+    total = 0.0
+
+    # 分块相乘，避免内存不足
+    for y in range(0, fd.RasterYSize, 512):
+        h = min(512, fd.RasterYSize-y)
+
+        for x in range(0, fd.RasterXSize, 512):
+            w = min(512, fd.RasterXSize-x)
+
+            f = fb.ReadAsArray(x, y, w, h)
+            p = pb.ReadAsArray(x, y, w, h)
+
+            valid = np.isfinite(f) & np.isfinite(p)
+            if fnd is not None:
+                valid &= (f != fnd)
+            if pnd is not None:
+                valid &= (p != pnd)
+
+            if np.any(valid & (f < 0)):
+                raise ValueError(city + ": Flood Mask 有负值")
+            if np.any(valid & (f > 1)):
+                raise ValueError(city + ": Flood Mask 不是 0/1")
+
+            result = np.full(f.shape, -9999, dtype=np.float32)
+            result[valid] = (
+                f[valid] * p[valid]
+            )
+
+            total += float(np.sum(
+                result[valid], dtype=np.float64
+            ))
+
+            ob.WriteArray(result, x, y)
+
+    out.FlushCache()
+    out = None
+    fd = None
+    pd = None
+
+    print(f"{city} Exposed Population: {total:,.0f}")
+    print("输出：", output, flush=True)
+
+print("\nxxxx 年n城市暴露人口计算完成！")
+''')
